@@ -102,6 +102,7 @@ type Server interface {
 	Running() bool
 	Do(command Command) (interface{}, error)
 	TakeSnapshot() error
+	TakeSnapshotFrom(commit, term uint64) error
 	LoadSnapshot() error
 	AddEventListener(string, EventListener)
 	FlushCommitIndex()
@@ -1173,6 +1174,60 @@ func (s *server) RemovePeer(name string) error {
 //--------------------------------------
 // Log compaction
 //--------------------------------------
+
+func (s *server) TakeSnapshotFrom(lastIndex, lastTerm uint64) error {
+	if s.stateMachine == nil {
+		return errors.New("Snapshot: Cannot create snapshot. Missing state machine.")
+	}
+
+	sm, ok := s.stateMachine.(PITStateMachine)
+
+	if !ok {
+		return errors.New("Snapshot: Cannot create snapshot. State machine doesn't satisfy PITStateMachine interface.")
+	}
+
+	// Shortcut without lock
+	// Exit if the server is currently creating a snapshot.
+	if s.pendingSnapshot != nil {
+		return errors.New("Snapshot: Last snapshot is not finished.")
+	}
+
+	// TODO: acquire the lock and no more committed is allowed
+	// This will be done after finishing refactoring heartbeat
+	s.debugln("take.snapshot")
+
+	// check if there is log has been committed since the
+	// last snapshot.
+	if lastIndex == s.log.startIndex {
+		return nil
+	}
+
+	path := s.SnapshotPath(lastIndex, lastTerm)
+	// Attach snapshot to pending snapshot and save it to disk.
+	s.pendingSnapshot = &Snapshot{lastIndex, lastTerm, nil, nil, path}
+
+	state, err := sm.SaveAt(lastIndex, lastTerm)
+	if err != nil {
+		return err
+	}
+
+	// Clone the list of peers.
+	peers := make([]*Peer, 0, len(s.peers)+1)
+	for _, peer := range s.peers {
+		peers = append(peers, peer.clone())
+	}
+	peers = append(peers, &Peer{Name: s.Name(), ConnectionString: s.connectionString})
+
+	// Attach snapshot to pending snapshot and save it to disk.
+	s.pendingSnapshot.Peers = peers
+	s.pendingSnapshot.State = state
+	s.saveSnapshot()
+
+	compactTerm := s.log.getEntry(lastIndex).Term()
+	s.log.compact(lastIndex, compactTerm)
+
+	return nil
+}
 
 func (s *server) TakeSnapshot() error {
 	if s.stateMachine == nil {
