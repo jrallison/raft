@@ -1198,7 +1198,7 @@ func (s *server) TakeSnapshotFrom(lastIndex, lastTerm uint64) error {
 
 	// check if there is log has been committed since the
 	// last snapshot.
-	if lastIndex == s.log.startIndex {
+	if lastIndex <= s.log.startIndex {
 		return nil
 	}
 
